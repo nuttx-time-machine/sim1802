@@ -66,6 +66,17 @@ The raw binary is mapped at 0x0000 and the CPU starts from the reset state
   them, `trap` stops with exit status 97);
 - `--symbols` reads only the symbol names of an ELF file, for `-t`/`-d`.
 
+Bank-switched ROM (`--banks N [--bank-port P]`, ROM mode only, `--rom-size`
+at most 32768): 0x8000-0xBFFF is a window onto one of N 16 KiB ROM banks.
+The image file is the fixed ROM (padded to `--rom-size`) followed by bank 0,
+bank 1, ...; missing banks read 0xFF.  `OUT P` (default 1) writes an 8-bit
+latch that selects the bank; a value >= N leaves the window reading 0xFF.
+The latch powers up with a pseudo-random value, like a real latch, so
+start-up code must select a bank before using one.  The window is
+write-protected like the rest of the ROM, and RAM starts at 0xC000.
+This is the memory map of the NuttX port's HWB profile (a latch whose
+outputs drive the high address lines of a large EPROM).
+
 The console is 8-bit clean in all modes (bytes 0x80-0xFF pass unchanged).
 
 Command-line options:

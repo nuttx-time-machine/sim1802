@@ -27,6 +27,8 @@ main(["--rom", File | Args], Map) -> main(Args, maps:put(rom, File, Map));
 main(["--rom-size", N | Args], Map) -> main(Args, maps:put(rom_size, rom_size_arg(N), Map));
 main(["--ram-seed", N | Args], Map) -> main(Args, maps:put(ram_seed, seed_arg(N), Map));
 main(["--rom-writes", M | Args], Map) -> main(Args, maps:put(rom_writes, wp_mode_arg(M), Map));
+main(["--banks", N | Args], Map) -> main(Args, maps:put(banks, banks_arg(N), Map));
+main(["--bank-port", N | Args], Map) -> main(Args, maps:put(bank_port, port_arg(N), Map));
 main(["--symbols", File | Args], Map) -> main(Args, maps:put(symbols, File, Map));
 main([], #{rom := RomFile} = Map) ->
   run_rom(RomFile, Map);
@@ -44,7 +46,8 @@ main([], _Map) ->
   io:format("Usage: ~s [-d/--debug] [-t/--trace] [--cycles] [--max-cycles N] [--pace HZ]"
             " <executable> <arguments..>\n"
             "       ~s [options] --rom <image.bin> [--rom-size N] [--ram-seed N]"
-            " [--rom-writes ignore|warn|trap] [--symbols <image.elf>]\n",
+            " [--rom-writes ignore|warn|trap] [--symbols <image.elf>]\n"
+            "       [--banks N [--bank-port P]]  (16 KiB bank window at 0x8000, latch on OUT P, default 1)\n",
             [Progname, Progname]),
   halt(1).
 
@@ -55,8 +58,14 @@ run_rom(RomFile, Map) ->
   RomSize = maps:get(rom_size, Map, 32768),
   Seed = maps:get(ram_seed, Map, 1802),
   WpMode = maps:get(rom_writes, Map, ignore),
+  Banks =
+    case maps:get(banks, Map, none) of
+      none -> none;
+      N when RomSize =< 16#8000 -> {N, maps:get(bank_port, Map, 1)};
+      _ -> io:format("--banks needs --rom-size 32768 or less (window at 0x8000)\n"), halt(1)
+    end,
   RandByte =
-    case sim1802_rom_loader:load(RomFile, RomSize, Seed, WpMode) of
+    case sim1802_rom_loader:load(RomFile, RomSize, Seed, WpMode, Banks) of
       {ok, Fun} -> Fun;
       {error, Reason} ->
         io:format("Error loading ~ts: ~ts\n", [RomFile, format_error(Reason)]),
@@ -81,6 +90,19 @@ run_rom(RomFile, Map) ->
 rom_size_arg(String) ->
   case int_arg(String) of
     N when N =< 65536 -> N;
+    _ -> usage_error(String)
+  end.
+
+banks_arg(String) ->
+  case int_arg(String) of
+    N when N =< 256 -> N;
+    _ -> usage_error(String)
+  end.
+
+%% Ports 6 and 7 belong to the I/O controller.
+port_arg(String) ->
+  case int_arg(String) of
+    N when N =< 5 -> N;
     _ -> usage_error(String)
   end.
 

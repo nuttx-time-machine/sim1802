@@ -109,7 +109,7 @@ out(Core, PortNr, Byte) ->
   case PortNr of
     ?SIM1802_IO_BUF -> write_buffer(Byte);
     ?SIM1802_IO_CMD -> write_command(Core, Byte);
-    _ -> ok
+    _ -> sim1802_memory:bank_out(PortNr, Byte)
   end.
 
 -spec is_interrupt() -> boolean().
