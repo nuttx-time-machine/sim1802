@@ -27,6 +27,7 @@
         , init/2
         , reset/1
         , set_options/2
+        , randomize_undefined/2
         , set_ef1/0
         , set_ef2/0
         , set_ef3/0
@@ -243,6 +244,20 @@ reset(Core) ->
 set_options(Core, Map) ->
   Core#core{ max_cyc = maps:get(max_cycles, Map, infinity)
            , pace = maps:get(pace, Map, false)
+           }.
+
+%% cdp1802-nuttx fork, --rom mode: after a real reset only I, N, X, P, R(0),
+%% Q and IE are defined [RCA MPM-201A p. 72, Fig. 86]; give everything else
+%% (R(1)..R(15), D, DF, T) values from RandByte() so that start-up code
+%% cannot rely on them being zero.
+-spec randomize_undefined(core(), fun(() -> byte())) -> core().
+randomize_undefined(Core, RandByte) ->
+  Word = fun() -> (RandByte() bsl 8) bor RandByte() end,
+  R = list_to_tuple([0 | [Word() || _ <- lists:seq(1, 15)]]),
+  Core#core{ r = R
+           , d = RandByte()
+           , df = RandByte() band 1
+           , t = RandByte()
            }.
 
 -spec get_cycles(core()) -> non_neg_integer().
@@ -1413,7 +1428,16 @@ get_word(Core, Address) ->
 set_byte(Core, Address, Byte) ->
   case sim1802_memory:is_write_protected(Address) of
     true ->
-      trap(Core, io_lib:format("write to write-protected address 0x~4.16.0B", [Address]));
+      case sim1802_memory:write_protect_mode() of
+        trap ->
+          trap(Core, io_lib:format("write to write-protected address 0x~4.16.0B", [Address]));
+        warn ->
+          io:format(standard_error, "@ ignored write of 0x~2.16.0B to ROM address 0x~4.16.0B\n",
+                    [Byte, Address]),
+          Core;
+        ignore ->
+          Core
+      end;
     false ->
       sim1802_memory:set_byte(Address, Byte),
       Core

@@ -5,6 +5,7 @@
 -module(sim1802_elf_loader).
 
 -export([ load/1
+        , load_symbols/1
         , format_error/1
         ]).
 
@@ -221,6 +222,23 @@ install_bootstrap(PC) ->
 %% Load ELF executable =========================================================
 
 -spec load_fd(file:fd()) -> {ok, {PC :: non_neg_integer(), map()}} | false | {error, {module(), term()}}.
+%% cdp1802-nuttx fork: read only the symbol table of an ELF file, for
+%% traces and the debugger when the program itself comes from a ROM image.
+-spec load_symbols(string()) -> {ok, map()} | {error, {module(), term()}}.
+load_symbols(File) ->
+  case file:open(File, [read, raw, read_ahead]) of
+    {ok, Fd} ->
+      try
+        case read_Ehdr(Fd) of
+          {ok, Ehdr} -> load_SymTab(Fd, Ehdr);
+          {error, _Reason} = Error -> Error
+        end
+      after
+        file:close(Fd)
+      end;
+    {error, Reason} -> {error, {file, Reason}}
+  end.
+
 load_fd(Fd) ->
   case read_Ehdr(Fd) of
     {ok, Ehdr} ->
