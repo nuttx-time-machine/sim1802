@@ -46,6 +46,28 @@ This branch (`cdp1802-nuttx`) extends the simulator for an RTOS port
 (Apache NuttX). All additions are backwards compatible: programs that
 don't use them behave as before.
 
+ROM mode (boot exactly like a real board):
+
+    cdp1802-unknown-elf-objcopy -O binary nuttx.elf nuttx.bin   # the EPROM contents
+    sim1802 --rom nuttx.bin [--rom-size N] [--ram-seed N]
+            [--rom-writes ignore|warn|trap] [--symbols nuttx.elf]
+
+The raw binary is mapped at 0x0000 and the CPU starts from the reset state
+(RCA MPM-201A p. 72: X=P=0, R0=0, Q=0, IE=1), with nothing else prepared:
+
+- the rest of the ROM window (`--rom-size`, default 32768) reads 0xFF, like an
+  erased EPROM; RAM is everything above it;
+- RAM and the registers that reset leaves undefined (R1..R15, D, DF, T) hold
+  pseudo-random values from `--ram-seed` (default 1802): a run is
+  reproducible, but code that assumes zeroed RAM or registers breaks as on
+  hardware;
+- no bootstrap code and no boot arguments are written;
+- writes to ROM are ignored like on hardware (`--rom-writes warn` reports
+  them, `trap` stops with exit status 97);
+- `--symbols` reads only the symbol names of an ELF file, for `-t`/`-d`.
+
+The console is 8-bit clean in all modes (bytes 0x80-0xFF pass unchanged).
+
 Command-line options:
 
     --cycles          print "@ cycles N" (machine cycles) on stderr at exit
