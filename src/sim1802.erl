@@ -29,6 +29,7 @@ main(["--ram-seed", N | Args], Map) -> main(Args, maps:put(ram_seed, seed_arg(N)
 main(["--rom-writes", M | Args], Map) -> main(Args, maps:put(rom_writes, wp_mode_arg(M), Map));
 main(["--banks", N | Args], Map) -> main(Args, maps:put(banks, banks_arg(N), Map));
 main(["--bank-port", N | Args], Map) -> main(Args, maps:put(bank_port, port_arg(N), Map));
+main(["--dump", File | Args], Map) -> main(Args, maps:put(dump, File, Map));
 main(["--symbols", File | Args], Map) -> main(Args, maps:put(symbols, File, Map));
 main([], #{rom := RomFile} = Map) ->
   run_rom(RomFile, Map);
@@ -47,7 +48,8 @@ main([], _Map) ->
             " <executable> <arguments..>\n"
             "       ~s [options] --rom <image.bin> [--rom-size N] [--ram-seed N]"
             " [--rom-writes ignore|warn|trap] [--symbols <image.elf>]\n"
-            "       [--banks N [--bank-port P]]  (16 KiB bank window at 0x8000, latch on OUT P, default 1)\n",
+            "       [--banks N [--bank-port P]]  (16 KiB bank window at 0x8000, latch on OUT P, default 1)\n"
+            "       [--dump FILE]  (write the 64 KiB address space to FILE on exit)\n",
             [Progname, Progname]),
   halt(1).
 

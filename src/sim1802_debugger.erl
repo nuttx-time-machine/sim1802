@@ -23,6 +23,7 @@
         , symtab :: sim1802_symtab:symtab()
         , prev = "" :: string()
         , cycles = false :: boolean() % --cycles: report machine cycles on exit
+        , dump = false :: false | string() % --dump FILE: memory image on exit
         }).
 
 %% API =========================================================================
@@ -47,6 +48,7 @@ cfg(SymTab, Map) ->
       , symtab = SymTab
       , prev = ""
       , cycles = maps:get(cycles, Map, false)
+      , dump = maps:get(dump, Map, false)
       }.
 
 %% Execute loop ================================================================
@@ -83,10 +85,23 @@ trap(Core, Reason, Cfg) ->
       end
   end.
 
-report_cycles(Core, #cfg{cycles = true}) ->
-  ?say("@ cycles ~p\n", [sim1802_core:get_cycles(Core)]);
-report_cycles(_Core, _Cfg) ->
-  ok.
+report_cycles(Core, Cfg = #cfg{cycles = true}) ->
+  ?say("@ cycles ~p\n", [sim1802_core:get_cycles(Core)]),
+  dump_memory(Core, Cfg);
+report_cycles(Core, Cfg) ->
+  dump_memory(Core, Cfg).
+
+%% cdp1802-nuttx fork: --dump FILE writes the 64 KiB address space as the
+%% CPU sees it at exit (the bank window shows the selected bank), for
+%% post-mortem analysis of a hung or crashed program; the registers are
+%% printed as well.
+dump_memory(_Core, #cfg{dump = false}) ->
+  ok;
+dump_memory(Core, Cfg = #cfg{dump = File}) ->
+  Bin = << <<(sim1802_core:get_byte(Core, A))>> || A <- lists:seq(0, 65535) >>,
+  ok = file:write_file(File, Bin),
+  print_core(Core, Cfg),
+  ?say("@ memory dumped to ~s\n", [File]).
 
 singlestep(Core, Cfg) ->
   print_pc(get_pc(Core), Cfg),

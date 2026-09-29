@@ -81,6 +81,11 @@ bank, because the symbol names there are ambiguous.
 
 The console is 8-bit clean in all modes (bytes 0x80-0xFF pass unchanged).
 
+`--dump FILE` writes the 64 KiB address space, as the CPU sees it (the bank
+window shows the selected bank), to FILE when the simulator stops for any
+reason, and prints the registers: a post-mortem for hung or crashed
+programs (e.g. walking an RTOS's task list with the program's symbols).
+
 Command-line options:
 
     --cycles          print "@ cycles N" (machine cycles) on stderr at exit
