@@ -22,6 +22,7 @@
         , breakpoints :: map()
         , symtab :: sim1802_symtab:symtab()
         , prev = "" :: string()
+        , cycles = false :: boolean() % --cycles: report machine cycles on exit
         }).
 
 %% API =========================================================================
@@ -45,6 +46,7 @@ cfg(SymTab, Map) ->
       , breakpoints = maps:new()
       , symtab = SymTab
       , prev = ""
+      , cycles = maps:get(cycles, Map, false)
       }.
 
 %% Execute loop ================================================================
@@ -70,16 +72,21 @@ trap(Core, Reason, Cfg) ->
         true ->
           ?say("! Exit ~p\n", [Status]),
           debug(Core, Cfg);
-        false -> halt(Status)
+        false -> report_cycles(Core, Cfg), halt(Status)
       end;
     _ ->
       ?say("! Trap ~s\n", [Reason]),
       print_core(Core, Cfg),
       case Cfg#cfg.debug of
         true -> debug(Core, Cfg);
-        false -> halt(97)
+        false -> report_cycles(Core, Cfg), halt(97)
       end
   end.
+
+report_cycles(Core, #cfg{cycles = true}) ->
+  ?say("@ cycles ~p\n", [sim1802_core:get_cycles(Core)]);
+report_cycles(_Core, _Cfg) ->
+  ok.
 
 singlestep(Core, Cfg) ->
   print_pc(get_pc(Core), Cfg),

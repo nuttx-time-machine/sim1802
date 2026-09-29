@@ -33,14 +33,22 @@
 %%%    device-specific handler.
 %%% 7. Interrupts from the device may be re-enabled by setting its
 %%%    bit in the interrupt enable register.
+%%%
+%%% cdp1802-nuttx fork additions (see sim1802_io.hrl for the commands):
+%%% - timer mode 4: IRQ 0 every N machine cycles (deterministic; the cycle
+%%%   count is kept by sim1802_core, which polls cycle_timer/0 after OUT)
+%%% - a latched 32-bit machine-cycle counter
 
 -module(sim1802_io).
 
 -export([ init/0
+        , cycle_timer/0
         , inp/1
         , is_interrupt/0
         , out/3
+        , raise_irq/1
         , wait_interrupt/0
+        , wait_interrupt/1
         ]).
 
 %% private: enable reloading code
@@ -58,6 +66,12 @@
 
 -define(ETS, ?MODULE).
 
+%% cdp1802-nuttx fork: cycle timer and console input
+-define(TIMER_MODE_CYCLES, 4).
+-define(cycle_timer, cycle_timer).   % {cycle_timer, Period, Generation}
+-define(cycle_period, cycle_period). % staging register for the period
+-define(cycles_latch, cycles_latch).
+
 %% API =========================================================================
 
 -spec init() -> ok.
@@ -67,6 +81,7 @@ init() ->
   semaphore_init(),
   interrupt_init(),
   timer_init(),
+  cycles_init(),
   ok.
 
 -spec inp(portnr()) -> byte().
@@ -91,6 +106,23 @@ is_interrupt() ->
 -spec wait_interrupt() -> ok.
 wait_interrupt() ->
   wait_semaphore().
+
+%% Wait at most TimeoutMs for an interrupt request.
+-spec wait_interrupt(non_neg_integer()) -> ok | timeout.
+wait_interrupt(TimeoutMs) ->
+  wait_semaphore(TimeoutMs).
+
+%% Raise interrupt request IRQ (used by the core's cycle timer).
+-spec raise_irq(0..7) -> ok.
+raise_irq(IRQ) ->
+  set_interrupt(IRQ).
+
+%% Current cycle-timer configuration: {PeriodInCycles (0 = off), Generation}.
+%% The generation changes on every reconfiguration.
+-spec cycle_timer() -> {non_neg_integer(), non_neg_integer()}.
+cycle_timer() ->
+  [{?cycle_timer, Period, Gen}] = ets:lookup(?ETS, ?cycle_timer),
+  {Period, Gen}.
 
 %% Internal ====================================================================
 
@@ -123,6 +155,22 @@ write_command(Core, Command) ->
       interrupt_write_pending();
     ?SIM1802_CMD_TIMER_WRITE_CONTROL ->
       timer_write_control();
+    ?SIM1802_CMD_TIMER_WRITE_PERIOD0 ->
+      timer_write_period(0);
+    ?SIM1802_CMD_TIMER_WRITE_PERIOD1 ->
+      timer_write_period(1);
+    ?SIM1802_CMD_TIMER_WRITE_PERIOD2 ->
+      timer_write_period(2);
+    ?SIM1802_CMD_CYCLES_LATCH ->
+      cycles_latch(Core);
+    ?SIM1802_CMD_CYCLES_READ0 ->
+      cycles_read(0);
+    ?SIM1802_CMD_CYCLES_READ1 ->
+      cycles_read(1);
+    ?SIM1802_CMD_CYCLES_READ2 ->
+      cycles_read(2);
+    ?SIM1802_CMD_CYCLES_READ3 ->
+      cycles_read(3);
     ?SIM1802_CMD_CONSOLE_PUTCHAR ->
       console_putchar();
     _ ->
@@ -157,6 +205,18 @@ set_semaphore() ->
 wait_semaphore() ->
   call(wait).
 
+wait_semaphore(TimeoutMs) ->
+  Pid = whereis(?SEMAPHORE),
+  Ref = make_ref(),
+  Pid ! {wait, self(), Ref},
+  receive
+    {ok, Pid, Ref} -> ok
+  after TimeoutMs ->
+    Pid ! {cancel, Ref},
+    %% the reply may have been sent just before the cancel arrived
+    receive {ok, Pid, Ref} -> ok after 0 -> timeout end
+  end.
+
 semaphore_loop(Waiter) ->
   receive
     {wait, Pid, Ref} when Waiter =:= false ->
@@ -172,6 +232,11 @@ semaphore_loop(Waiter) ->
       release_waiter(Waiter),
       reply_ok(Pid, Ref),
       ?MODULE:semaphore_loop(false);
+    {cancel, Ref} ->
+      case Waiter of
+        {_Pid, Ref} -> ?MODULE:semaphore_loop(false);
+        _ -> ?MODULE:semaphore_loop(Waiter)
+      end;
     Msg ->
       io:format(standard_error, "@ Invalid semaphore msg ~p (waiter ~p)\n", [Msg, Waiter]),
       ?MODULE:semaphore_loop(Waiter)
@@ -323,8 +388,44 @@ timer_delay(Mode) ->
 
 timer_write_control() ->
   Byte = read_buffer(),
-  ?TIMER ! {reset, Byte},
+  case Byte of
+    ?TIMER_MODE_CYCLES ->
+      ?TIMER ! {reset, 0},
+      set_cycle_timer(ets:lookup_element(?ETS, ?cycle_period, 2));
+    _ ->
+      set_cycle_timer(0),
+      ?TIMER ! {reset, Byte}
+  end,
   ok.
+
+%% Cycle-driven timer (cdp1802-nuttx fork) ====================================
+
+
+cycles_init() ->
+  ets:insert(?ETS, {?cycle_timer, 0, 0}),
+  ets:insert(?ETS, {?cycle_period, 0}),
+  ets:insert(?ETS, {?cycles_latch, 0}),
+  ok.
+
+timer_write_period(ByteNr) ->
+  Shift = 8 * ByteNr,
+  Old = ets:lookup_element(?ETS, ?cycle_period, 2),
+  New = (Old band bnot (16#FF bsl Shift)) bor (read_buffer() bsl Shift),
+  ets:update_element(?ETS, ?cycle_period, {2, New}),
+  ok.
+
+set_cycle_timer(Period) ->
+  Gen = ets:lookup_element(?ETS, ?cycle_timer, 3),
+  ets:insert(?ETS, {?cycle_timer, Period, Gen + 1}),
+  ok.
+
+cycles_latch(Core) ->
+  ets:update_element(?ETS, ?cycles_latch, {2, sim1802_core:get_cycles(Core)}),
+  ok.
+
+cycles_read(ByteNr) ->
+  Latch = ets:lookup_element(?ETS, ?cycles_latch, 2),
+  write_buffer((Latch bsr (8 * ByteNr)) band 16#FF).
 
 %% Console =====================================================================
 

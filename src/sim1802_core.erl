@@ -1,6 +1,13 @@
 %%% -*- erlang-indent-level: 2 -*-
 %%%
 %%% CDP1802 CPU core simulation with partial CDP1804AC support
+%%%
+%%% Machine-cycle accounting (cdp1802-nuttx fork): every instruction adds its
+%%% documented number of machine cycles (RCA MPM-201A p. 8: 2 cycles, 3 for
+%%% long branch/skip and NOP; Intersil CDP1805AC/1806AC datasheet for the
+%%% 68-prefixed instructions), an interrupt response adds 1 (the S3 cycle).
+%%% The cycle count drives the optional deterministic timer (sim1802_io
+%%% timer mode 4) so that simulated time does not depend on host speed.
 
 -module(sim1802_core).
 
@@ -15,9 +22,11 @@
         , get_r/2
         , get_word/2
         , get_x/1
+        , get_cycles/1
         , halt/2
         , init/2
         , reset/1
+        , set_options/2
         , set_ef1/0
         , set_ef2/0
         , set_ef3/0
@@ -57,6 +66,13 @@
         , q   :: uint1_t() % Programmable flip-flop
         , trc :: boolean() % Trace each instruction being executed
         , symtab :: sim1802_symtab:symtab() % Symbol table from image file
+          %% cdp1802-nuttx fork: machine cycles and the cycle-driven timer
+        , cyc = 0 :: non_neg_integer() % machine cycles since start
+        , tmr_period = 0 :: non_neg_integer() % cycle timer period, 0 = off
+        , tmr_next = 0 :: non_neg_integer() % cycle of the next timer IRQ
+        , tmr_gen = 0 :: non_neg_integer() % last seen timer configuration
+        , max_cyc = infinity :: infinity | non_neg_integer() % --max-cycles
+        , pace = false :: false | pos_integer() % --pace: clock in Hz
         }).
 
 -type core() :: #core{}.
@@ -219,6 +235,20 @@ reset(Core) ->
            , r = setelement(0 + 1, R, 0)
            }.
 
+%% Options from the command line (cdp1802-nuttx fork):
+%%   max_cycles => N   stop with exit status 96 after N machine cycles
+%%   pace => Hz        when idling on the cycle timer, pace simulated time
+%%                     to host time for a CPU clock of Hz (8 clocks/cycle)
+-spec set_options(core(), map()) -> core().
+set_options(Core, Map) ->
+  Core#core{ max_cyc = maps:get(max_cycles, Map, infinity)
+           , pace = maps:get(pace, Map, false)
+           }.
+
+-spec get_cycles(core()) -> non_neg_integer().
+get_cycles(#core{cyc = Cyc}) ->
+  Cyc.
+
 -spec step(core()) -> {ok, core()} | {error, {core(), any()}}.
 step(Core) ->
   try {ok, do_step(Core)}
@@ -272,11 +302,11 @@ trap(Core, Reason) ->
 %% Instruction sequencing ======================================================
 
 do_step(Core) ->
-  Core1 = fetch_and_execute(Core),
+  Core1 = check_cycle_limit(check_cycle_timer(fetch_and_execute(Core))),
   %% Interrupts occur after the S1 (execute) cycle.
   %% This means that the special "init" cycle after reset isn't needed.
   case pred_IE_NZ(Core1) andalso sim1802_io:is_interrupt() of
-    true -> interrupt(Core1);
+    true -> add_cycles(interrupt(Core1), 1); % S3 interrupt response cycle
     false -> Core1
   end.
 
@@ -285,7 +315,8 @@ fetch_and_execute(Core) ->
   A = get_r(Core, P),
   Opcode = get_byte(Core, A),
   trace(Core, A, Opcode),
-  execute(set_r(Core, P, uint16_inc(A)), Opcode).
+  Cycles = op_cycles(Core, A, Opcode),
+  add_cycles(execute(set_r(Core, P, uint16_inc(A)), Opcode), Cycles).
 
 trace(#core{trc = false}, _A, _Opcode) -> ok;
 trace(#core{symtab = SymTab}, A, Opcode) ->
@@ -1028,8 +1059,34 @@ long_skip(Core, Pred) ->
 
 emu_IDL(Core) ->
   case pred_IE_NZ(Core) of
-    true -> sim1802_io:wait_interrupt(), Core;
+    true -> idle(Core);
     false -> trap(Core, "deadlock")
+  end.
+
+%% IDL with interrupts enabled.  Without the cycle timer, block until some
+%% interrupt is pending (original behaviour).  With the cycle timer, advance
+%% simulated time to the next timer interrupt unless one is already pending;
+%% with --pace, first wait the corresponding host time (or until another
+%% interrupt source, e.g. console input, wakes us up).
+idle(#core{tmr_period = 0} = Core) ->
+  sim1802_io:wait_interrupt(),
+  Core;
+idle(#core{cyc = Cyc, tmr_next = Next, pace = Pace} = Core) ->
+  case sim1802_io:is_interrupt() of
+    true -> Core;
+    false when Next =< Cyc -> Core;
+    false when Pace =:= false -> Core#core{cyc = Next};
+    false ->
+      %% machine cycle = 8 clock periods
+      Ms = ((Next - Cyc) * 8 * 1000) div Pace,
+      T0 = erlang:monotonic_time(microsecond),
+      case sim1802_io:wait_interrupt(Ms) of
+        timeout -> Core#core{cyc = Next};
+        ok ->
+          Us = erlang:monotonic_time(microsecond) - T0,
+          Elapsed = (Us * Pace) div (8 * 1000000),
+          Core#core{cyc = min(Next, Cyc + Elapsed)}
+      end
   end.
 
 emu_NOP(Core) ->
@@ -1084,7 +1141,7 @@ emu_OUT(Core, N) ->
   A = get_r(Core, X),
   Byte = get_byte(Core, A),
   io_out(Core, N, Byte),
-  set_r(Core, X, uint16_inc(A)).
+  sync_cycle_timer(set_r(Core, X, uint16_inc(A))).
 
 emu_INP(Core, N) ->
   Byte = io_inp(Core, N band 7),
@@ -1203,6 +1260,71 @@ pred_EF4_Z(_Core) ->
 
 pred_IE_NZ(Core) ->
   get_ie(Core) =/= 0.
+
+%% Machine cycles ==============================================================
+
+add_cycles(#core{cyc = Cyc} = Core, N) ->
+  Core#core{cyc = Cyc + N}.
+
+%% Machine cycles of the instruction at A (opcode already fetched).
+%% CDP1802: 2 cycles, except long branch, long skip and NOP (Cx): 3
+%% [RCA MPM-201A p. 8 and instruction summary pp. 99-105].
+op_cycles(Core, A, ?OP_68) ->
+  cycles_68(get_byte(Core, uint16_inc(A)));
+op_cycles(_Core, _A, Opcode) ->
+  cycles_1802(Opcode).
+
+cycles_1802(Opcode) when Opcode band 16#F0 =:= 16#C0 -> 3;
+cycles_1802(_Opcode) -> 2.
+
+%% 68-prefixed CDP1804/1805/1806 instructions, machine cycles including the
+%% prefix [Intersil CDP1805AC/CDP1806AC datasheet, March 1997, instruction
+%% summary].  Simulator pseudo-ops (681N) and unimplemented ones count 3.
+cycles_68(Op) ->
+  case Op bsr 4 of
+    16#2 -> 5;  % DBNZ
+    16#6 -> 5;  % RLXA
+    16#8 -> 10; % SCAL
+    16#9 -> 8;  % SRET
+    16#A -> 5;  % RSXD
+    16#B -> 4;  % RNX
+    16#C -> 5;  % RLDI
+    _ ->
+      case Op of
+        ?OP_DSAV -> 6;
+        ?OP_DADC -> 4;
+        ?OP_DSMB -> 4;
+        ?OP_DACI -> 4;
+        ?OP_DSBI -> 4;
+        ?OP_DADD -> 4;
+        ?OP_DSM  -> 4;
+        ?OP_DADI -> 4;
+        ?OP_DSMI -> 4;
+        _ -> 3  % counter/timer and interrupt-control ops, BCI, BXI
+      end
+  end.
+
+%% Pick up a changed timer configuration after an OUT instruction.
+sync_cycle_timer(#core{tmr_gen = Gen, cyc = Cyc} = Core) ->
+  case sim1802_io:cycle_timer() of
+    {_Period, Gen} -> Core;
+    {Period, NewGen} ->
+      Core#core{tmr_period = Period, tmr_next = Cyc + Period, tmr_gen = NewGen}
+  end.
+
+check_cycle_timer(#core{tmr_period = 0} = Core) -> Core;
+check_cycle_timer(#core{cyc = Cyc, tmr_next = Next} = Core) when Cyc < Next -> Core;
+check_cycle_timer(#core{cyc = Cyc, tmr_next = Next, tmr_period = Period} = Core) ->
+  sim1802_io:raise_irq(0),
+  %% Ticks missed while interrupts were masked collapse into one, as with a
+  %% hardware latch; the timer stays in phase with its period.
+  Core#core{tmr_next = Next + Period * (1 + (Cyc - Next) div Period)}.
+
+check_cycle_limit(#core{max_cyc = infinity} = Core) -> Core;
+check_cycle_limit(#core{cyc = Cyc, max_cyc = Max} = Core) when Cyc < Max -> Core;
+check_cycle_limit(#core{max_cyc = Max} = Core) ->
+  io:format(standard_error, "@ Cycle limit ~p reached\n", [Max]),
+  halt(Core, 96).
 
 %% Accessing registers =========================================================
 
@@ -1543,5 +1665,30 @@ dsub_vectors() -> % decimal (packed BCD) subtraction (X - Y)
   , {16#E0, { 16#C0,  16#C1,  16#C2,  16#C3,  16#C4,  16#C5,  16#C6,  16#C7,  16#C8,  16#C9,  16#C4,  16#C5,  16#C6,  16#C7,  16#C8,  16#C9}}
   , {16#F0, { 16#B0,  16#B1,  16#B2,  16#B3,  16#B4,  16#B5,  16#B6,  16#B7,  16#B8,  16#B9,  16#B4,  16#B5,  16#B6,  16#B7,  16#B8,  16#B9}}
   ].
+
+%% cdp1802-nuttx fork: machine cycles per instruction.
+%% CDP1802: 2, or 3 for long branch/skip and NOP [MPM-201A p. 8];
+%% 68-prefixed: Intersil CDP1805AC/CDP1806AC datasheet (March 1997).
+cycles_1802_test() ->
+  ?assertEqual(2, cycles_1802(16#F8)),   % LDI
+  ?assertEqual(2, cycles_1802(16#30)),   % BR (short)
+  ?assertEqual(2, cycles_1802(16#D5)),   % SEP 5
+  ?assertEqual(2, cycles_1802(16#00)),   % IDL (initial S0+S1)
+  ?assertEqual(3, cycles_1802(16#C0)),   % LBR
+  ?assertEqual(3, cycles_1802(16#C4)),   % NOP
+  ?assertEqual(3, cycles_1802(16#CC)).   % LSIE
+
+cycles_68_test() ->
+  ?assertEqual(5, cycles_68(16#C3)),     % RLDI R3
+  ?assertEqual(5, cycles_68(16#63)),     % RLXA R3
+  ?assertEqual(5, cycles_68(16#A3)),     % RSXD R3
+  ?assertEqual(5, cycles_68(16#23)),     % DBNZ R3
+  ?assertEqual(4, cycles_68(16#B3)),     % RNX R3
+  ?assertEqual(10, cycles_68(16#84)),    % SCAL R4
+  ?assertEqual(8, cycles_68(16#94)),     % SRET R4
+  ?assertEqual(6, cycles_68(16#76)),     % DSAV
+  ?assertEqual(4, cycles_68(16#F4)),     % DADD
+  ?assertEqual(3, cycles_68(16#07)),     % STM
+  ?assertEqual(3, cycles_68(16#3E)).     % BCI
 
 -endif.
