@@ -38,6 +38,9 @@
 
 %% Console commands:
 -define(SIM1802_CMD_CONSOLE_PUTCHAR,            16#E0).
--define(SIM1802_CMD_CONSOLE_GETCHAR,            16#E1).
+-define(SIM1802_CMD_CONSOLE_GETCHAR,            16#E1). % buffer := next input byte (0 if none)
+%% cdp1802-nuttx fork: console input status.  Buffer bit 0: an input byte is
+%% available; bit 1: end of input (host stdin closed) and nothing buffered.
+-define(SIM1802_CMD_CONSOLE_STATUS,             16#E2).
 
 -endif. % SIM1802_IO_HRL

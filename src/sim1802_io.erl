@@ -12,7 +12,9 @@
 %%%   * a 2-bit control register
 %%% - IRQs 1-5: reserved
 %%% - IRQ 6: console
-%%%   * an 8-bit input buffer
+%%%   * an input queue fed from host stdin (cdp1802-nuttx fork), started on
+%%%     the first console input command or when IRQ 6 is enabled, so that
+%%%     programs that never read input do not consume stdin
 %%% - IRQ 7: reserved, could be used for daisy-chaining
 %%%
 %%% The argument/result buffer is written with OUT 6 and read with INP 6.
@@ -38,6 +40,7 @@
 %%% - timer mode 4: IRQ 0 every N machine cycles (deterministic; the cycle
 %%%   count is kept by sim1802_core, which polls cycle_timer/0 after OUT)
 %%% - a latched 32-bit machine-cycle counter
+%%% - console input: GETCHAR, STATUS, IRQ 6 while input is available
 
 -module(sim1802_io).
 
@@ -52,7 +55,8 @@
         ]).
 
 %% private: enable reloading code
--export([ semaphore_loop/1
+-export([ console_reader/0
+        , semaphore_loop/1
         , timer_disabled_loop/0
         , timer_enabled_loop/1
         ]).
@@ -71,6 +75,10 @@
 -define(cycle_timer, cycle_timer).   % {cycle_timer, Period, Generation}
 -define(cycle_period, cycle_period). % staging register for the period
 -define(cycles_latch, cycles_latch).
+-define(IRQ_CONSOLE, 6).
+-define(CONSOLE, sim1802_console).
+-define(CONSOLE_ETS, sim1802_console_queue). % ordered_set of {Seq, Byte}
+-define(console_eof, console_eof).
 
 %% API =========================================================================
 
@@ -82,6 +90,7 @@ init() ->
   interrupt_init(),
   timer_init(),
   cycles_init(),
+  console_init(),
   ok.
 
 -spec inp(portnr()) -> byte().
@@ -173,6 +182,10 @@ write_command(Core, Command) ->
       cycles_read(3);
     ?SIM1802_CMD_CONSOLE_PUTCHAR ->
       console_putchar();
+    ?SIM1802_CMD_CONSOLE_GETCHAR ->
+      console_getchar();
+    ?SIM1802_CMD_CONSOLE_STATUS ->
+      console_status();
     _ ->
       io:format(standard_error, "@ Invalid I/O command 0x~2.16.0B\n", [Command])
   end.
@@ -263,8 +276,8 @@ reply_ok(Pid, Ref) -> Pid ! {ok, self(), Ref}.
 
 interrupt_init() ->
   ets:insert(?ETS, {?enabled, 0}),
-  %% One tuple element per IRQ: {pending, P0, ..., P7}.  The timer process
-  %% and the CPU both change pending bits; updating one
+  %% One tuple element per IRQ: {pending, P0, ..., P7}.  The timer process,
+  %% the console reader and the CPU all change pending bits; updating one
   %% element with ets:update_element/3 is atomic, so no update is lost
   %% (a read-modify-write of a single byte could lose one).
   ets:insert(?ETS, {?pending, 0, 0, 0, 0, 0, 0, 0, 0}),
@@ -305,7 +318,12 @@ interrupt_read_pending() ->
   write_buffer(read_pending()).
 
 interrupt_write_enabled() ->
-  write_enabled(read_buffer()),
+  Enabled = read_buffer(),
+  write_enabled(Enabled),
+  case Enabled band (1 bsl ?IRQ_CONSOLE) of
+    0 -> ok;
+    _ -> console_start(), console_check_irq()
+  end,
   check_interrupt().
 
 interrupt_write_pending() ->
@@ -432,3 +450,81 @@ cycles_read(ByteNr) ->
 console_putchar() ->
   file:write(standard_io, [read_buffer()]),
   ok.
+
+%% Console input (cdp1802-nuttx fork) ==========================================
+%%
+%% A reader process moves host stdin into a queue.  IRQ 6 behaves like a
+%% level-triggered UART receive interrupt: it is pending exactly while input
+%% is queued (set when a byte arrives, re-evaluated after GETCHAR and when
+%% IRQ 6 is enabled), so a driver must drain the queue before re-enabling
+%% IRQ 6.  It is also raised once when host stdin reaches EOF.  Input arrives in host time, so the cycle at which a byte
+%% becomes visible is not deterministic; the byte order is.
+
+
+%% Only the reader process inserts (with increasing sequence numbers) and only
+%% the CPU removes (ets:take/2 of the lowest key), so no update can be lost.
+console_init() ->
+  ets:new(?CONSOLE_ETS, [ordered_set, named_table, public]),
+  ets:insert(?ETS, {?console_eof, false}),
+  ok.
+
+console_start() ->
+  case whereis(?CONSOLE) of
+    undefined ->
+      Pid = spawn_link(fun ?MODULE:console_reader/0),
+      try register(?CONSOLE, Pid)
+      catch error:badarg -> exit(Pid, kill) % lost a (harmless) race
+      end,
+      ok;
+    _ -> ok
+  end.
+
+console_reader() ->
+  console_reader(0).
+
+console_reader(Seq) ->
+  case io:get_chars(standard_io, "", 1) of
+    [Char] when is_integer(Char) ->
+      console_push(Seq, Char band 16#FF),
+      console_reader(Seq + 1);
+    <<Char>> ->
+      console_push(Seq, Char),
+      console_reader(Seq + 1);
+    _EofOrError ->
+      %% Signal end of input once, so that an interrupt-driven reader
+      %% sleeping in IDL notices it (STATUS then reports bit 1).
+      ets:update_element(?ETS, ?console_eof, {2, true}),
+      set_interrupt(?IRQ_CONSOLE)
+  end.
+
+console_push(Seq, Byte) ->
+  ets:insert(?CONSOLE_ETS, {Seq, Byte}),
+  set_interrupt(?IRQ_CONSOLE).
+
+%% Level behaviour: IRQ 6 is pending exactly while input is queued.
+console_check_irq() ->
+  case ets:first(?CONSOLE_ETS) of
+    '$end_of_table' -> clear_pending(?IRQ_CONSOLE);
+    _ -> set_interrupt(?IRQ_CONSOLE)
+  end.
+
+console_getchar() ->
+  console_start(),
+  case ets:first(?CONSOLE_ETS) of
+    '$end_of_table' ->
+      write_buffer(0);
+    Seq ->
+      [{Seq, Byte}] = ets:take(?CONSOLE_ETS, Seq),
+      write_buffer(Byte),
+      console_check_irq()
+  end.
+
+console_status() ->
+  console_start(),
+  Status =
+    case {ets:first(?CONSOLE_ETS), ets:lookup_element(?ETS, ?console_eof, 2)} of
+      {'$end_of_table', true} -> 2;
+      {'$end_of_table', false} -> 0;
+      {_, _} -> 1
+    end,
+  write_buffer(Status).
