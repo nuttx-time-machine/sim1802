@@ -342,7 +342,14 @@ trace(#core{symtab = SymTab}, A, Opcode) ->
       false ->
         io_lib:format("~4.16.0b", [A])
     end,
-  io:format(standard_error, "@ ~s op ~2.16.0b\n", [Address, Opcode]).
+  %% cdp1802-nuttx fork: in the bank window, the symbol table cannot tell
+  %% the banks apart (they share addresses), so name the selected bank.
+  Bank =
+    case sim1802_memory:bank_select() of
+      B when is_integer(B), A >= 16#8000, A < 16#C000 -> io_lib:format(" [b~w]", [B]);
+      _ -> ""
+    end,
+  io:format(standard_error, "@ ~s op ~2.16.0b~s\n", [Address, Opcode, Bank]).
 
 execute(Core, Opcode) ->
   case Opcode of

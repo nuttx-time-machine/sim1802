@@ -24,6 +24,7 @@
         , is_write_protected/1
         , init_banks/3
         , bank_out/2
+        , bank_select/0
         ]).
 
 -export_type([ wp_mode/0
@@ -114,6 +115,14 @@ bank_out(Port, Byte) ->
   case persistent_term:get(?BANKS, none) of
     {_BA, Latch, _N, Port} -> atomics:put(Latch, 1, Byte);
     _ -> ok
+  end.
+
+%% Current latch value (for traces), or none without a bank window.
+-spec bank_select() -> byte() | none.
+bank_select() ->
+  case persistent_term:get(?BANKS, none) of
+    {_BA, Latch, _N, _Port} -> atomics:get(Latch, 1);
+    none -> none
   end.
 
 fill_banks(_BA, I, Size, _Bin) when I > Size -> ok;

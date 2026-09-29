@@ -75,7 +75,9 @@ The latch powers up with a pseudo-random value, like a real latch, so
 start-up code must select a bank before using one.  The window is
 write-protected like the rest of the ROM, and RAM starts at 0xC000.
 This is the memory map of the NuttX port's HWB profile (a latch whose
-outputs drive the high address lines of a large EPROM).
+outputs drive the high address lines of a large EPROM).  In an instruction
+trace (`-t`), addresses in the window are followed by ` [bN]`, the selected
+bank, because the symbol names there are ambiguous.
 
 The console is 8-bit clean in all modes (bytes 0x80-0xFF pass unchanged).
 
