@@ -267,15 +267,19 @@ load_phdr(Fd, Phdr, PhdrIx) ->
     _PType -> {error, {?MODULE, {invalid_phdr, PhdrIx}}}
   end.
 
+%% cdp1802-nuttx fork: segments are loaded at their physical (load) address,
+%% as a ROM programmer would place them.  For ordinary images p_paddr equals
+%% p_vaddr; for a ROM image whose .data is copied to RAM at start-up, the
+%% initial .data contents must land in ROM (p_paddr), not at its RAM address.
 load_phdr(Fd, Phdr) ->
   #elf32_Phdr{ p_offset = Offset
-             , p_vaddr = VAddr
+             , p_paddr = PAddr
              , p_filesz = FileSz
              } = Phdr,
-  case VAddr + FileSz =< 65536 - 256 of
+  case PAddr + FileSz =< 65536 - 256 of
     true ->
       case seek(Fd, Offset) of
-        ok -> copy_file_to_core(Fd, VAddr, FileSz);
+        ok -> copy_file_to_core(Fd, PAddr, FileSz);
         {error, _Reason} = Error -> Error
       end;
     false -> {error, {?MODULE, program_too_large}}

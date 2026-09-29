@@ -78,6 +78,10 @@ queued, and it is raised once at end of input. Drain the input before
 re-enabling IRQ 6. Host stdin is only read once a program uses console
 input (0xE1/0xE2 or enabling IRQ 6).
 
+ELF segments are loaded at their physical (load) address `p_paddr`, which
+equals `p_vaddr` for ordinary images; a ROM image whose `.data` is copied to
+RAM at start-up gets its initial `.data` into ROM, as on real hardware.
+
 ROM emulation: if the ELF image defines the symbol `__sim1802_rom_end`,
 writes to `[0, __sim1802_rom_end)` trap ("write to write-protected
 address", exit status 97). Without it, the upstream rule (`__DTOR_END__` or
