@@ -496,9 +496,13 @@ console_reader(Seq) ->
       console_reader(Seq + 1);
     _EofOrError ->
       %% Signal end of input once, so that an interrupt-driven reader
-      %% sleeping in IDL notices it (STATUS then reports bit 1).
+      %% sleeping in IDL notices it (STATUS then reports bit 1).  The
+      %% reader stays registered: if it exited, the next STATUS or GETCHAR
+      %% would start a new one, which would hit EOF and raise IRQ 6 again,
+      %% forever.
       ets:update_element(?ETS, ?console_eof, {2, true}),
-      set_interrupt(?IRQ_CONSOLE)
+      set_interrupt(?IRQ_CONSOLE),
+      receive stop -> ok end
   end.
 
 console_push(Seq, Byte) ->
