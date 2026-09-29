@@ -78,6 +78,11 @@ queued, and it is raised once at end of input. Drain the input before
 re-enabling IRQ 6. Host stdin is only read once a program uses console
 input (0xE1/0xE2 or enabling IRQ 6).
 
+ROM emulation: if the ELF image defines the symbol `__sim1802_rom_end`,
+writes to `[0, __sim1802_rom_end)` trap ("write to write-protected
+address", exit status 97). Without it, the upstream rule (`__DTOR_END__` or
+`_fini`) applies.
+
 Pending-interrupt bits are now updated atomically, fixing a possible lost
 update between the timer process and interrupt acknowledgement.
 

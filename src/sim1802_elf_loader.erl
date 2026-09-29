@@ -36,10 +36,17 @@ set_write_protect(SymTab) ->
     Limit -> sim1802_memory:write_protect(Limit)
   end.
 
+%% cdp1802-nuttx fork: an image may define __sim1802_rom_end to say exactly
+%% where its read-only region ends, e.g. to emulate a board with 32 KiB of
+%% ROM.  Otherwise fall back to the libc-specific symbols as before.
 find_end_of_text_and_rodata(SymTab) ->
-  case maps:get("__DTOR_END__", SymTab, false) of
-    false -> maps:get("_fini", SymTab, false);
-    Address -> Address
+  case maps:get("__sim1802_rom_end", SymTab, false) of
+    false ->
+      case maps:get("__DTOR_END__", SymTab, false) of
+        false -> maps:get("_fini", SymTab, false);
+        Address -> Address
+      end;
+    RomEnd -> RomEnd
   end.
 
 %% Install bootstrap ===========================================================
