@@ -84,6 +84,10 @@
 
 -spec init() -> ok.
 init() ->
+  %% cdp1802-nuttx fork: the console is an 8-bit serial line.  Without this,
+  %% the Erlang I/O server treats stdin/stdout as UTF-8 text, so an output
+  %% byte >= 0x80 becomes two bytes and input bytes >= 0x80 are decoded.
+  ok = io:setopts(standard_io, [{encoding, latin1}]),
   ets:new(?ETS, [named_table, public]),
   buffer_init(),
   semaphore_init(),
