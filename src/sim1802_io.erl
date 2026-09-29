@@ -198,7 +198,11 @@ reply_ok(Pid, Ref) -> Pid ! {ok, self(), Ref}.
 
 interrupt_init() ->
   ets:insert(?ETS, {?enabled, 0}),
-  ets:insert(?ETS, {?pending, 0}),
+  %% One tuple element per IRQ: {pending, P0, ..., P7}.  The timer process
+  %% and the CPU both change pending bits; updating one
+  %% element with ets:update_element/3 is atomic, so no update is lost
+  %% (a read-modify-write of a single byte could lose one).
+  ets:insert(?ETS, {?pending, 0, 0, 0, 0, 0, 0, 0, 0}),
   ok.
 
 interrupt_acknowledge() ->
@@ -210,7 +214,7 @@ interrupt_acknowledge() ->
     Mask ->
       IRQ = ctz(Mask),
       write_enabled(Enabled band bnot (1 bsl IRQ)),
-      write_pending(Pending band bnot (1 bsl IRQ)),
+      clear_pending(IRQ),
       write_buffer(IRQ),
       reset_semaphore(),
       check_interrupt()
@@ -244,8 +248,11 @@ interrupt_write_pending() ->
   check_interrupt().
 
 set_interrupt(IRQ) ->
-  write_pending(read_pending() bor (1 bsl IRQ)),
+  ets:update_element(?ETS, ?pending, {IRQ + 2, 1}),
   check_interrupt().
+
+clear_pending(IRQ) ->
+  ets:update_element(?ETS, ?pending, {IRQ + 2, 0}).
 
 check_interrupt() ->
   case read_enabled() band read_pending() of
@@ -257,14 +264,17 @@ read_enabled() ->
   ets:lookup_element(?ETS, ?enabled, 2).
 
 read_pending() ->
-  ets:lookup_element(?ETS, ?pending, 2).
+  [{?pending, P0, P1, P2, P3, P4, P5, P6, P7}] = ets:lookup(?ETS, ?pending),
+  P0 bor (P1 bsl 1) bor (P2 bsl 2) bor (P3 bsl 3)
+    bor (P4 bsl 4) bor (P5 bsl 5) bor (P6 bsl 6) bor (P7 bsl 7).
 
 write_enabled(Byte) ->
   ets:update_element(?ETS, ?enabled, {2, Byte}),
   ok.
 
 write_pending(Byte) ->
-  ets:update_element(?ETS, ?pending, {2, Byte}),
+  ets:update_element(?ETS, ?pending,
+                     [{I + 2, (Byte bsr I) band 1} || I <- lists:seq(0, 7)]),
   ok.
 
 %% Timer =====================================================================
