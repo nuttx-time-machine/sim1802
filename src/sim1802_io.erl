@@ -510,9 +510,20 @@ console_push(Seq, Byte) ->
   set_interrupt(?IRQ_CONSOLE).
 
 %% Level behaviour: IRQ 6 is pending exactly while input is queued.
+%%
+%% The reader process runs concurrently: it inserts a byte, then sets the
+%% pending bit.  If a byte arrived between our "queue empty" test and the
+%% clear, the clear would wipe its interrupt and the byte would wait
+%% forever (seen with input typed at a terminal, one byte at a time: NSH
+%% stopped responding).  So look at the queue again after clearing.
 console_check_irq() ->
   case ets:first(?CONSOLE_ETS) of
-    '$end_of_table' -> clear_pending(?IRQ_CONSOLE);
+    '$end_of_table' ->
+      clear_pending(?IRQ_CONSOLE),
+      case ets:first(?CONSOLE_ETS) of
+        '$end_of_table' -> ok;
+        _ -> set_interrupt(?IRQ_CONSOLE)
+      end;
     _ -> set_interrupt(?IRQ_CONSOLE)
   end.
 
